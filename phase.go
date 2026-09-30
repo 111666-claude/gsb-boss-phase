@@ -1,6 +1,7 @@
 // Package bossphase 是 BOSS 阶段机：按血量阈值推进阶段，只前进不回退，跳级逐级触发。
-// 缺陷：回血会掉回旧阶段、跳级只算一次、同一阶段重复触发、阈值边界差一、全扫阈值表。
 package bossphase
+
+import "sort"
 
 // Phase 是一个阶段，血量降到 BelowPct（含）时进入。
 type Phase struct {
@@ -18,26 +19,38 @@ type Machine struct {
 
 // NewMachine 建一个阶段机。
 func NewMachine(phases []Phase) *Machine {
-	return &Machine{phases: append([]Phase(nil), phases...)}
+	return &Machine{phases: append([]Phase(nil), phases...), index: -1}
 }
 
 // Update 结算一次血量，返回本次新触发的阶段名。
-// 缺陷：用严格小于判阈值（正好到阈值不进阶段）、每次都重新定位（回血会回退）、
-// 跳级只返回最后一个、同一阶段重复触发、全扫阈值表。
+// 阈值含边界（hpPct <= BelowPct 即进入）；当前阶段索引只增不减；
+// 一次掉血跨过多个阶段时，中间每个阶段按顺序各触发一次并累计 Events。
+// 定位用二分（单次 O(log n)），且先以一条哨兵阈值挡住不推进的结算，
+// 使重复/回血这类无推进结算为 O(1)，Scanned 不随阶段数线性增长。
 func (m *Machine) Update(hpPct float64) []string {
-	var fired []string
-	for index, phase := range m.phases {
-		m.scanned++
-		if hpPct < phase.BelowPct {
-			m.index = index
-			fired = append(fired, phase.Name)
-		}
-	}
-	m.events += len(fired)
-	if len(fired) == 0 {
+	next := m.index + 1
+	if next >= len(m.phases) {
 		return nil
 	}
-	return fired[len(fired)-1:]
+	m.scanned++
+	if hpPct > m.phases[next].BelowPct {
+		return nil
+	}
+
+	// hpPct <= 下一个阶段的阈值，在后缀 phases[next:] 上二分最深可达阶段。
+	target := next + sort.Search(len(m.phases)-next, func(off int) bool {
+		m.scanned++
+		return hpPct > m.phases[next+off].BelowPct
+	}) - 1
+
+	fired := make([]string, 0, target-m.index)
+	for ; next <= target; next++ {
+		m.scanned++
+		fired = append(fired, m.phases[next].Name)
+	}
+	m.index = target
+	m.events += len(fired)
+	return fired
 }
 
 // Current 是当前阶段名。
